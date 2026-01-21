@@ -13,7 +13,7 @@ let bot = null;
 
 // ==================== BOT MESSAGES ====================
 const MESSAGES = {
-    WELCOME: `🎉 *Welcome to Mail Cron Bot!*
+    WELCOME_NEW: `🎉 *Welcome to Mail Cron Bot!*
 
 I'll help you stay on top of important placement and interview emails from your Gmail and Outlook accounts.
 
@@ -26,7 +26,22 @@ I'll help you stay on top of important placement and interview emails from your 
    • 📝 Assessment Tests
    • 🎉 Shortlist Notifications
 
-Let's get started! Which email provider would you like to connect first?`,
+Let's get started! Which email provider would you like to connect?`,
+
+    WELCOME_BACK: `👋 *Welcome back, {name}!*
+
+*Your Connected Accounts:*
+{accounts}
+
+{action_prompt}`,
+
+    ALL_CONNECTED: `✅ Both Gmail and Outlook are connected. You're all set!
+
+*Commands:*
+/status - Check connection status
+/settings - Manage notifications
+/history - View recent emails
+/help - All commands`,
 
     CHOOSE_PROVIDER: `Which email provider would you like to connect?`,
 
@@ -161,6 +176,44 @@ const KEYBOARDS = {
 };
 
 /**
+ * Build dynamic keyboard based on user's connected providers
+ * @param {Object} user - User document
+ * @returns {Object} Inline keyboard
+ */
+function buildProviderKeyboard(user) {
+    const gmailConnected = user?.providers?.gmail?.enabled;
+    const outlookConnected = user?.providers?.outlook?.enabled;
+
+    const buttons = [];
+
+    // Row for unconnected providers
+    const connectRow = [];
+    if (!gmailConnected) {
+        connectRow.push({ text: '📧 Connect Gmail', callback_data: 'connect_gmail' });
+    }
+    if (!outlookConnected) {
+        connectRow.push({ text: '📧 Connect Outlook', callback_data: 'connect_outlook' });
+    }
+    if (connectRow.length > 0) {
+        buttons.push(connectRow);
+    }
+
+    // Row for reconnecting existing providers
+    const reconnectRow = [];
+    if (gmailConnected) {
+        reconnectRow.push({ text: '🔄 Reconnect Gmail', callback_data: 'reconnect_gmail' });
+    }
+    if (outlookConnected) {
+        reconnectRow.push({ text: '🔄 Reconnect Outlook', callback_data: 'reconnect_outlook' });
+    }
+    if (reconnectRow.length > 0) {
+        buttons.push(reconnectRow);
+    }
+
+    return { inline_keyboard: buttons };
+}
+
+/**
  * Initialize Telegram bot in webhook mode
  * @returns {TelegramBot} Bot instance
  */
@@ -251,19 +304,67 @@ async function handleStart(msg) {
     const botInstance = getBot();
 
     try {
-        // Create or get user
-        await db.findOrCreateUser(msg.from);
+        // Check if user already exists
+        let user = await db.getUserByChatId(chatId.toString());
 
-        // Update session
-        await db.updateSession(chatId.toString(), {
-            state: 'AWAITING_PROVIDER_CHOICE'
-        });
+        if (!user) {
+            // New user - create and show welcome
+            user = await db.findOrCreateUser(msg.from);
 
-        // Send welcome message
-        await botInstance.sendMessage(chatId, MESSAGES.WELCOME, {
+            await db.updateSession(chatId.toString(), {
+                state: 'AWAITING_PROVIDER_CHOICE'
+            });
+
+            await botInstance.sendMessage(chatId, MESSAGES.WELCOME_NEW, {
+                parse_mode: 'Markdown',
+                reply_markup: KEYBOARDS.PROVIDER_CHOICE
+            });
+            return;
+        }
+
+        // Existing user - check what's connected
+        const gmailConnected = user.providers?.gmail?.enabled;
+        const outlookConnected = user.providers?.outlook?.enabled;
+
+        // Build accounts status
+        const accounts = [];
+        if (gmailConnected) {
+            accounts.push(`✅ Gmail: ${user.providers.gmail.email || 'Connected'}`);
+        } else {
+            accounts.push('❌ Gmail: Not connected');
+        }
+        if (outlookConnected) {
+            accounts.push(`✅ Outlook: ${user.providers.outlook.email || 'Connected'}`);
+        } else {
+            accounts.push('❌ Outlook: Not connected');
+        }
+
+        // Determine action prompt
+        let actionPrompt = '';
+        if (gmailConnected && outlookConnected) {
+            // Both connected
+            actionPrompt = 'You can reconnect accounts if needed, or use /help for commands.';
+        } else if (!gmailConnected && !outlookConnected) {
+            // None connected
+            actionPrompt = 'Connect an email account to get started:';
+        } else {
+            // One connected
+            actionPrompt = 'Connect another account or manage existing ones:';
+        }
+
+        const welcomeMessage = MESSAGES.WELCOME_BACK
+            .replace('{name}', user.firstName || 'User')
+            .replace('{accounts}', accounts.join('\n'))
+            .replace('{action_prompt}', actionPrompt);
+
+        // Build dynamic keyboard
+        const keyboard = buildProviderKeyboard(user);
+
+        await botInstance.sendMessage(chatId, welcomeMessage, {
             parse_mode: 'Markdown',
-            reply_markup: KEYBOARDS.PROVIDER_CHOICE
+            reply_markup: keyboard.inline_keyboard.length > 0 ? keyboard : undefined
         });
+
     } catch (error) {
         logger.error('Error in /start handler', { error: error.message, chatId });
         await botInstance.sendMessage(chatId, MESSAGES.ERROR);
@@ -665,7 +766,10 @@ async function sendEmailNotification(chatId, email, classification) {
         const emoji = getCategoryEmoji(classification.category);
         const formattedDate = formatDate(email.date);
 
-        const message = `${emoji} *${classification.category.replace(/_/g, ' ')}*
+        // Add spam warning if email was found in spam/junk folder
+        const spamWarning = email.isSpam ? '\n\n⚠️ *Found in Spam/Junk folder!*' : '';
+
+        const message = `${emoji} *${classification.category.replace(/_/g, ' ')}*${spamWarning}
 
 📧 *Subject:* ${escapeMarkdown(email.subject)}
 
@@ -685,7 +789,7 @@ _Confidence: ${Math.round(classification.confidence * 100)}%_`;
             disable_web_page_preview: true
         });
 
-        logger.info('Email notification sent', { chatId, emailId: email.id, category: classification.category });
+        logger.info('Email notification sent', { chatId, emailId: email.id, category: classification.category, isSpam: email.isSpam });
         return true;
     } catch (error) {
         logger.error('Failed to send email notification', { chatId, error: error.message });

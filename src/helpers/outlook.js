@@ -1,6 +1,7 @@
 /**
  * Outlook Helper
  * Handles OAuth token refresh and fetching emails from Microsoft Graph API
+ * Fetches from both Inbox and Junk Email folders
  */
 
 const axios = require('axios');
@@ -106,7 +107,7 @@ async function getAccessToken(refreshToken) {
 }
 
 /**
- * Fetch emails from Outlook for a user
+ * Fetch emails from Outlook for a user (Inbox + Junk)
  * @param {string} refreshToken - User's Outlook refresh token
  * @param {number} sinceTimestamp - Fetch emails after this timestamp (ms)
  * @returns {Promise<Array>} Array of email objects
@@ -116,11 +117,49 @@ async function fetchEmails(refreshToken, sinceTimestamp) {
 
     // Format date for Graph API filter
     const sinceDate = new Date(sinceTimestamp).toISOString();
+
+    logger.debug('Outlook query', { since: sinceDate });
+
+    const allEmails = [];
+
+    // Fetch from Inbox
+    try {
+        const inboxEmails = await fetchFromFolder(accessToken, 'inbox', sinceDate);
+        allEmails.push(...inboxEmails);
+        logger.info(`Found ${inboxEmails.length} emails from Outlook Inbox`);
+    } catch (error) {
+        logger.error('Failed to fetch Outlook Inbox', { error: error.message });
+    }
+
+    // Fetch from Junk Email (Spam)
+    try {
+        const junkEmails = await fetchFromFolder(accessToken, 'junkemail', sinceDate);
+        // Mark junk emails so we can flag them in notification
+        junkEmails.forEach(email => {
+            email.isSpam = true;
+        });
+        allEmails.push(...junkEmails);
+        if (junkEmails.length > 0) {
+            logger.info(`Found ${junkEmails.length} emails from Outlook Junk`);
+        }
+    } catch (error) {
+        logger.warn('Failed to fetch Outlook Junk', { error: error.message });
+    }
+
+    return allEmails;
+}
+
+/**
+ * Fetch emails from a specific folder
+ * @param {string} accessToken - Access token
+ * @param {string} folderName - Folder name (inbox, junkemail, etc.)
+ * @param {string} sinceDate - ISO date string
+ * @returns {Promise<Array>} Array of email objects
+ */
+async function fetchFromFolder(accessToken, folderName, sinceDate) {
     const filter = `receivedDateTime ge ${sinceDate}`;
 
-    logger.debug('Outlook query', { filter });
-
-    const response = await axios.get(`${GRAPH_API_BASE}/me/mailFolders/inbox/messages`, {
+    const response = await axios.get(`${GRAPH_API_BASE}/me/mailFolders/${folderName}/messages`, {
         headers: {
             'Authorization': `Bearer ${accessToken}`,
             'Content-Type': 'application/json'
@@ -129,21 +168,18 @@ async function fetchEmails(refreshToken, sinceTimestamp) {
             '$filter': filter,
             '$top': 50,
             '$orderby': 'receivedDateTime desc',
-            '$select': 'id,subject,from,toRecipients,receivedDateTime,bodyPreview,body,webLink,isRead,conversationId'
+            '$select': 'id,subject,from,toRecipients,receivedDateTime,bodyPreview,body,webLink,isRead,conversationId,parentFolderId'
         }
     });
 
     const messages = response.data.value || [];
 
     if (messages.length === 0) {
-        logger.debug('No new emails from Outlook');
         return [];
     }
 
-    logger.info(`Found ${messages.length} emails from Outlook`);
-
     // Parse messages
-    const emails = messages.map(msg => parseOutlookMessage(msg)).filter(Boolean);
+    const emails = messages.map(msg => parseOutlookMessage(msg, folderName === 'junkemail')).filter(Boolean);
 
     return emails;
 }
@@ -151,9 +187,10 @@ async function fetchEmails(refreshToken, sinceTimestamp) {
 /**
  * Parse Outlook message into standardized email object
  * @param {Object} message - Graph API message object
+ * @param {boolean} isJunk - Whether the message is from junk folder
  * @returns {Object} Standardized email object
  */
-function parseOutlookMessage(message) {
+function parseOutlookMessage(message, isJunk = false) {
     try {
         // Extract sender
         const from = message.from?.emailAddress
@@ -192,7 +229,8 @@ function parseOutlookMessage(message) {
             snippet: (message.bodyPreview || '').substring(0, 300),
             body: body.substring(0, 2000),
             webLink: message.webLink || `https://outlook.office.com/mail/inbox/id/${message.id}`,
-            isRead: message.isRead
+            isRead: message.isRead,
+            isSpam: isJunk
         };
     } catch (error) {
         logger.warn('Failed to parse Outlook message', { error: error.message });

@@ -1,6 +1,7 @@
 /**
  * Gmail Helper
  * Handles OAuth token refresh and fetching emails from Gmail API
+ * Fetches from both Inbox and Spam folders
  */
 
 const { google } = require('googleapis');
@@ -79,7 +80,7 @@ async function exchangeCodeForTokens(code) {
 }
 
 /**
- * Fetch emails from Gmail for a user
+ * Fetch emails from Gmail for a user (Inbox + Spam)
  * @param {string} refreshToken - User's Gmail refresh token
  * @param {number} sinceTimestamp - Fetch emails after this timestamp (ms)
  * @returns {Promise<Array>} Array of email objects
@@ -94,25 +95,67 @@ async function fetchEmails(refreshToken, sinceTimestamp) {
 
     // Calculate the "after" date for Gmail query (seconds)
     const afterDate = Math.floor(sinceTimestamp / 1000);
+
+    logger.debug('Gmail query', { since: new Date(sinceTimestamp).toISOString() });
+
+    const allEmails = [];
+
+    // Fetch from Inbox (default query)
+    try {
+        const inboxEmails = await fetchFromLabel(gmail, afterDate, null);
+        allEmails.push(...inboxEmails);
+        logger.info(`Found ${inboxEmails.length} emails from Gmail Inbox`);
+    } catch (error) {
+        logger.error('Failed to fetch Gmail Inbox', { error: error.message });
+    }
+
+    // Fetch from Spam folder
+    try {
+        const spamEmails = await fetchFromLabel(gmail, afterDate, 'SPAM');
+        // Mark spam emails so we can flag them in notification
+        spamEmails.forEach(email => {
+            email.isSpam = true;
+        });
+        allEmails.push(...spamEmails);
+        if (spamEmails.length > 0) {
+            logger.info(`Found ${spamEmails.length} emails from Gmail Spam`);
+        }
+    } catch (error) {
+        logger.warn('Failed to fetch Gmail Spam', { error: error.message });
+    }
+
+    return allEmails;
+}
+
+/**
+ * Fetch emails from a specific label/folder
+ * @param {Object} gmail - Gmail API client
+ * @param {number} afterDate - Unix timestamp in seconds
+ * @param {string|null} labelId - Label ID (null for default search)
+ * @returns {Promise<Array>} Array of email objects
+ */
+async function fetchFromLabel(gmail, afterDate, labelId) {
     const query = `after:${afterDate}`;
 
-    logger.debug('Gmail query', { query, since: new Date(sinceTimestamp).toISOString() });
-
-    // List messages matching the query
-    const listResponse = await gmail.users.messages.list({
+    const listParams = {
         userId: 'me',
         q: query,
         maxResults: 50
-    });
+    };
+
+    // If specific label requested, add it
+    if (labelId) {
+        listParams.labelIds = [labelId];
+    }
+
+    // List messages matching the query
+    const listResponse = await gmail.users.messages.list(listParams);
 
     const messages = listResponse.data.messages || [];
 
     if (messages.length === 0) {
-        logger.debug('No new emails from Gmail');
         return [];
     }
-
-    logger.info(`Found ${messages.length} emails from Gmail`);
 
     // Fetch full message details
     const emails = [];
@@ -175,6 +218,9 @@ function parseGmailMessage(message) {
         const dateStr = getHeader('date');
         const timestamp = dateStr ? new Date(dateStr).getTime() : parseInt(message.internalDate);
 
+        // Check if email is in spam
+        const isSpam = (message.labelIds || []).includes('SPAM');
+
         return {
             id: `gmail_${message.id}`,
             provider: 'gmail',
@@ -187,7 +233,8 @@ function parseGmailMessage(message) {
             snippet: snippet.substring(0, 300),
             body: body.substring(0, 2000),
             webLink: `https://mail.google.com/mail/u/0/#inbox/${message.id}`,
-            labels: message.labelIds || []
+            labels: message.labelIds || [],
+            isSpam: isSpam
         };
     } catch (error) {
         logger.warn('Failed to parse Gmail message', { error: error.message });

@@ -53,15 +53,21 @@ function generateRunId() {
 
 /**
  * Calculate since timestamp for fetching emails
+ * If lastChecked exists, use (lastChecked - 1 minute) to avoid missing boundary emails
  */
 function getSinceTimestamp(user, provider) {
     const lastChecked = user.lastChecked?.[provider];
 
     if (lastChecked) {
+        // Subtract 1 minute from last checked to avoid missing emails at the boundary
+        const lastCheckedWithBuffer = new Date(lastChecked).getTime() - (1 * 60 * 1000);
+
+        // But don't go older than 30 minutes
         const thirtyMinsAgo = Date.now() - (DEFAULT_LOOKBACK_MINUTES * 60 * 1000);
-        return Math.max(new Date(lastChecked).getTime(), thirtyMinsAgo);
+        return Math.max(lastCheckedWithBuffer, thirtyMinsAgo);
     }
 
+    // First time: look back 30 minutes
     return Date.now() - (DEFAULT_LOOKBACK_MINUTES * 60 * 1000);
 }
 
