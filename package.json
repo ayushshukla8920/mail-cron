@@ -1,0 +1,33 @@
+{
+  "name": "mail-cron",
+  "version": "2.0.0",
+  "description": "Email monitoring service with Telegram bot onboarding and MongoDB storage",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [
+    "email",
+    "gmail",
+    "outlook",
+    "telegram",
+    "notifications",
+    "placement",
+    "mongodb"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@azure/msal-node": "^2.6.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "express": "^4.18.0",
+    "googleapis": "^130.0.0",
+    "mongoose": "^8.0.0",
+    "node-telegram-bot-api": "^0.64.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
